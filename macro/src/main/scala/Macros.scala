@@ -1,15 +1,23 @@
 import scala.language.experimental.macros
 import scala.reflect.macros.whitebox.Context
 
-trait Mappable[T] {
-  def toMap(t: T): Map[String, Any]
-  def fromMap(map: Map[String, Any]): T
+import org.apache.spark.sql.{SparkSession, Dataset}
+
+trait TablesCaseClass[T <: Product] {
+  def toDB(dbName: String, t: T): Unit
+  def fromDB(spark: SparkSession, dbName: String): T
 }
 
-object Mappable {
-  implicit def materializeMappable[T]: Mappable[T] = macro materializeMappableImpl[T]
+object TablesCaseClass {
+  //def toDB[T <: Product](t: T)(implicit converter: TablesCaseClass[T]) = converter.toDB(t)
+  def toDB[T <: Product](dbName: String, t: T)(implicit converter: TablesCaseClass[T]) = converter.fromDB(dbName, dbName)
 
-  def materializeMappableImpl[T: c.WeakTypeTag](c: Context): c.Expr[Mappable[T]] = {
+  def fromDB[T <: Product](spark: SparkSession, dbName: String)(implicit converter: TablesCaseClass[T]) = converter.fromDB(spark, dbName)
+
+  implicit def materializeTablesCaseClass[T <: Product]: TablesCaseClass[T] = macro materializeTablesCaseClassImpl[T]
+
+  p
+  def materializeTablesCaseClassImpl[T <: Product : c.WeakTypeTag](c: Context): c.Expr[TablesCaseClass[T]] = {
     import c.universe._
     val tpe = weakTypeOf[T]
     val companion = tpe.typeSymbol.companion
@@ -18,18 +26,25 @@ object Mappable {
       case m: MethodSymbol if m.isPrimaryConstructor ⇒ m
     }.get.paramLists.head
 
-    val (toMapParams, fromMapParams) = fields.map { field ⇒
+    val loadFromDb = fields.map { field ⇒
       val name = field.name.toTermName
       val decoded = name.decodedName.toString
-      val returnType = tpe.decl(name).typeSignature
 
-      (q"$decoded → t.$name", q"map($decoded).asInstanceOf[$returnType]")
-    }.unzip
+      q"spark.table($decoded).as" //(spark.implicits.newProductEncoder)"
+    }
+    val writeToDbStatements = fields.map { field ⇒
+      val name = field.name.toTermName
+      val decoded = name.decodedName.toString
 
-    c.Expr[Mappable[T]] { q"""
-      new Mappable[$tpe] {
-        def toMap(t: $tpe): Map[String, Any] = Map(..$toMapParams)
-        def fromMap(map: Map[String, Any]): $tpe = $companion(..$fromMapParams)
+          //spark.sql("USE " + dbName)
+        //def toDB(t: $tpe): Map[String, Any] = Map(..$toMapParams)
+    c.Expr[TablesCaseClass[T]] { q"""
+      new TablesCaseClass[$tpe] {
+        def toDB(t: T): Unit = ..$writeToDBStatements
+        def fromDB(spark: SparkSession, dbName: String): $tpe = {
+          //import spark.implicits._
+          $companion(..$loadFromDb)
+        }
       }
     """ }
   }
